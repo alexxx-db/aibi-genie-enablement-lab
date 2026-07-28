@@ -1,5 +1,18 @@
-*conf*.json
+# macOS
 .DS_Store
-__pycache__
-.idea/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# Environment / secrets
 .env
+*.local
+*conf*.json
+
+# Editor
+.vscode/
+.idea/

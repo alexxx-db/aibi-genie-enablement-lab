@@ -1,0 +1,436 @@
+# =============================================================================
+# Dataset bundle: retail_sales
+# =============================================================================
+# This ONE file drives the entire lab for this dataset:
+#   - what synthetic data gets generated (tables:)
+#   - the "ambiguous metric" teaching story (ambiguity:)
+#   - the questions learners ask Genie (questions:)
+#   - how the two Genie Agents are configured (genie:)
+#   - which metric view file to deploy (metric_view:)
+#
+# To plug in a new dataset: copy this folder, edit the YAML, done.
+# Notebooks and helper code never change. See docs/ADDING_A_DATASET.md.
+#
+# Placeholders available in any string value (resolved at runtime):
+#   {catalog}      - UC catalog for the lab (pre-existing, auto-detected)
+#   {data_schema}  - schema holding the learner's data copy (= {user_schema})
+#   {user_schema}  - learner's personal schema        (e.g. user_jdoe)
+#   {metric_view}  - fully qualified metric view name
+#   {user}         - short learner name               (e.g. jdoe)
+# =============================================================================
+
+name: retail_sales
+display_name: Retail Sales
+description: >-
+  Orders, order items, products and customers for a fictional retailer.
+  Deliberately modeled so that "revenue" is ambiguous: discounts, cancelled
+  orders, returns and shipping fees all make the number debatable.
+
+defaults:
+  catalog: aibi_genie_lab # fallback only - notebooks auto-detect the workspace catalog
+
+seed: 42 # datagen is deterministic per seed + scale
+
+# -----------------------------------------------------------------------------
+# Synthetic data spec. Tables are generated in the order listed
+# (parents before children). Generators supported by src/lab/datagen.py:
+#   id | int | float | choice | date | person_name | product_name
+#   fk (sample key from parent) | parent_key | lookup (copy col via fk)
+#   derived (Spark SQL expr over this table's columns)
+# -----------------------------------------------------------------------------
+tables:
+  customers:
+    rows: 500
+    comment: Customers of the retailer.
+    columns:
+      - { name: customer_id, gen: id, comment: Unique identifier for each customer. }
+      - { name: customer_name, gen: person_name, comment: Customer's full name. }
+      - name: region
+        gen: choice
+        values: [AMER, EMEA, APAC]
+        weights: [0.45, 0.35, 0.2]
+        comment: Sales region the customer belongs to (AMER, EMEA, APAC).
+      - name: segment
+        gen: choice
+        values: [Consumer, Corporate, Small Business]
+        weights: [0.5, 0.3, 0.2]
+        comment: Customer segment (Consumer, Corporate, Small Business).
+      - name: signup_date
+        gen: date
+        start: 2024-01-01
+        end: 2026-06-30
+        comment: Date the customer first signed up.
+
+  products:
+    rows: 80
+    comment: Product catalog with list prices.
+    columns:
+      - { name: product_id, gen: id, comment: Unique identifier for each product. }
+      - { name: product_name, gen: product_name, comment: Product display name. }
+      - name: category
+        gen: choice
+        values: [Electronics, Home & Kitchen, Outdoor, Apparel, Toys]
+        comment: Product category.
+      - name: unit_price
+        gen: float
+        min: 5
+        max: 400
+        round: 2
+        comment: List price per unit, before any discount.
+
+  orders:
+    rows: 16000 # ~660/month across the 2026-2027 window
+    comment: Order headers, one row per customer order.
+    columns:
+      - { name: order_id, gen: id, comment: Unique identifier for each order. }
+      - name: customer_id
+        gen: fk
+        table: customers
+        column: customer_id
+        comment: Customer who placed the order (joins to customers.customer_id).
+      # Fixed absolute window: June 2026 is the demo focus ("last month" during
+      # July 2026 sessions), and data runs to end of 2027 so future dashboards
+      # have a full timeline. Deterministic regardless of generation date.
+      - name: order_date
+        gen: date
+        start: 2026-01-01
+        end: 2027-12-31
+        comment: Date the order was placed.
+      - name: status
+        gen: choice
+        values: [completed, cancelled, returned]
+        weights: [0.82, 0.06, 0.12]
+        comment: >-
+          completed = charged and kept. cancelled = never charged. returned =
+          charged, then fully refunded.
+      - name: sales_channel
+        gen: choice
+        values: [online, store, partner]
+        weights: [0.6, 0.3, 0.1]
+        comment: How the order was placed (online, store, partner).
+      - name: shipping_amount
+        gen: float
+        min: 0
+        max: 25
+        round: 2
+        comment: Shipping fee charged to the customer. Not product revenue.
+
+  order_items:
+    rows_per_parent: { table: orders, key: order_id, min: 1, max: 4 }
+    comment: Order line items. Discounts apply per line.
+    columns:
+      - { name: order_item_id, gen: id, comment: Unique identifier for each order line item. }
+      - { name: order_id, gen: parent_key, comment: Order this line belongs to (joins to orders.order_id). }
+      - name: product_id
+        gen: fk
+        table: products
+        column: product_id
+        comment: Product on this line (joins to products.product_id).
+      - { name: quantity, gen: int, min: 1, max: 5, comment: Number of units of the product on this line. }
+      - name: discount_pct
+        gen: choice
+        values: [0.0, 0.05, 0.1, 0.2]
+        weights: [0.55, 0.2, 0.15, 0.1]
+        comment: Fractional discount applied to this line (0.0 = none, 0.2 = 20% off).
+      - name: unit_price
+        gen: lookup
+        via: product_id
+        table: products
+        key: product_id
+        column: unit_price
+        comment: List price per unit, copied from the product.
+      - name: gross_amount
+        gen: derived
+        expr: ROUND(quantity * unit_price, 2)
+        comment: Line amount at list price, before any discount.
+      - name: discount_amount
+        gen: derived
+        expr: ROUND(quantity * unit_price * discount_pct, 2)
+        comment: Discount applied to this line.
+      - name: net_amount
+        gen: derived
+        expr: ROUND(quantity * unit_price * (1 - discount_pct), 2)
+        comment: >-
+          Amount actually charged for this line (list price minus discount).
+          Whether it counts as revenue depends on the order status.
+
+# -----------------------------------------------------------------------------
+# Module 1 data exploration: Catalog Explorer walk (rendered by notebook 01;
+# a "click your schema" step with a live link is prepended automatically).
+# -----------------------------------------------------------------------------
+explore:
+  intro: No SQL needed - you can browse all of this in the {catalog_ui}.
+  screenshot: 01_1_catalog_explorer.png
+  steps:
+    - Open the <b>orders</b> table and switch to the <b>Sample data</b> tab.
+    - "Look at the <b>status</b> column: <code>completed</code>,
+      <code>cancelled</code>, <code>returned</code>. What does each mean for
+      the money the company actually kept?"
+    - "Now open <b>order_items</b>: compare <code>unit_price</code>,
+      <code>discount_amount</code> and <code>net_amount</code> - three
+      different ideas of what an item 'sold for'."
+
+# -----------------------------------------------------------------------------
+# The teaching story: why the headline metric is ambiguous here.
+# Notebook 01 renders the story and runs each sql variant -> different numbers.
+# -----------------------------------------------------------------------------
+ambiguity:
+  metric: revenue
+  unit: "$"
+  story_intro: >-
+    Ask three people at this retailer what last month's revenue was, and you
+    may get three different numbers. The company never agreed on one
+    definition, so every report answers these questions differently:
+  story_questions:
+    - Do we count the list price, or the price actually charged after discounts?
+    - Do cancelled orders count? The customer was never charged.
+    - Do returned orders count? They were charged, then refunded.
+    - Is shipping part of revenue?
+  story_punchline: >-
+    Every combination gives a different number, and none of them is wrong.
+    So what is the correct answer?
+  sql_variants:
+    - label: "Gross sales (naive join, everything counts)"
+      sql: |
+        SELECT ROUND(SUM(oi.gross_amount), 2) AS revenue
+        FROM {catalog}.{data_schema}.orders o
+        JOIN {catalog}.{data_schema}.order_items oi ON o.order_id = oi.order_id
+        WHERE o.order_date >= DATE '2026-06-01'
+          AND o.order_date < DATE '2026-07-01'
+    - label: "Net of discounts, excluding cancelled orders"
+      sql: |
+        SELECT ROUND(SUM(oi.net_amount), 2) AS revenue
+        FROM {catalog}.{data_schema}.orders o
+        JOIN {catalog}.{data_schema}.order_items oi ON o.order_id = oi.order_id
+        WHERE o.status <> 'cancelled'
+          AND o.order_date >= DATE '2026-06-01'
+          AND o.order_date < DATE '2026-07-01'
+    - label: "Recognized revenue: completed orders only (refunds excluded)"
+      sql: |
+        SELECT ROUND(SUM(oi.net_amount), 2) AS revenue
+        FROM {catalog}.{data_schema}.orders o
+        JOIN {catalog}.{data_schema}.order_items oi ON o.order_id = oi.order_id
+        WHERE o.status = 'completed'
+          AND o.order_date >= DATE '2026-06-01'
+          AND o.order_date < DATE '2026-07-01'
+    - label: "Completed orders incl. shipping fees"
+      sql: |
+        SELECT ROUND(
+          (SELECT SUM(oi.net_amount)
+           FROM {catalog}.{data_schema}.orders o
+           JOIN {catalog}.{data_schema}.order_items oi ON o.order_id = oi.order_id
+           WHERE o.status = 'completed'
+             AND o.order_date >= DATE '2026-06-01'
+             AND o.order_date < DATE '2026-07-01')
+          +
+          (SELECT SUM(o.shipping_amount)
+           FROM {catalog}.{data_schema}.orders o
+           WHERE o.status = 'completed'
+             AND o.order_date >= DATE '2026-06-01'
+             AND o.order_date < DATE '2026-07-01')
+        , 2) AS revenue
+
+# -----------------------------------------------------------------------------
+# Questions learners ask Genie. 'ambiguous' entries are PAIRS of rephrasings of
+# 'ask' questions are what learners put to the module-2 Genie Agent. The point
+# is NOT that Genie is inconsistent (it usually isn't) - it's that Genie must
+# CHOOSE a revenue definition on its own, because nothing told it one. Learners
+# open Show code and see which definition it picked. This is reliable on every
+# run; it does not depend on Genie misbehaving.
+# -----------------------------------------------------------------------------
+questions:
+  ask:
+    - "What was our total revenue in June 2026?"
+    - "What was our return rate in June 2026?"
+  # Representative SQL Genie generates for each, shown as the "answer key" at
+  # the bottom of the ask-Genie block. verdict: correct | wrong.
+  answers:
+    - metric: Revenue
+      verdict: correct
+      screenshot: 02_4_show_code_revenue.png
+      note: >-
+        Completed orders, net of discounts - Genie nailed it with no guidance.
+        But will it land here every time?
+    - metric: Return rate
+      verdict: wrong
+      screenshot: 02_5_show_code_return_rate.png
+      note: >-
+        Numerator's right, but it divided by <code>COUNT(*)</code> - all orders,
+        including cancelled. Base should be fulfilled only: 10.9% vs the correct 11.5%.
+  followups:
+    - "Show monthly revenue trend for this year"
+    - "What is our return rate by category?"
+    - "Which region has the highest average order value?"
+
+# -----------------------------------------------------------------------------
+# Genie Agent configuration.
+# Module 2 (raw):      instructions intentionally sparse - ambiguity is the lesson.
+# Module 3 (curation): learners TEACH the module-2 agent: instructions +
+#                      example question/SQL pairs. Answers improve - but the
+#                      fix is prose, per-agent, unversioned. That's the setup
+#                      for the metric view.
+# Module 5 (mv):       points Genie at the certified metric view.
+# -----------------------------------------------------------------------------
+genie:
+  raw_space:
+    screenshot: 02_1_new_genie_space.png # shown above the create-space steps
+    rename_screenshot: 02_3_rename_space.png # shown inline on the rename step
+    title_template: "Retail Sales and Customer Analytics"
+    description: "Lab Module 2: Genie over raw retail tables."
+    tables: [customers, products, orders, order_items] # from {data_schema}
+    instructions: "" # sparse on purpose
+    sample_questions:
+      - "What was our total revenue in June 2026?"
+      - "Which product category generates the most revenue?"
+  # Module 3, Step 3: after teaching, the same questions now come back correct.
+  taught_answers:
+    - metric: Revenue
+      verdict: correct
+      screenshot: 03_11_revenue_answer.png
+      note: >-
+        $852,085 - completed orders, net of discounts, and formatted with no
+        decimals, just as your instructions say.
+    - metric: Return rate
+      verdict: correct
+      screenshot: 03_12_return_rate_answer.png
+      note: >-
+        11.5%, now based on fulfilled orders (completed + returned) - your
+        return_rate measure. Up from the 10.9% Genie guessed in Module 2.
+  # Module 3 teaches ONE of each of Genie's four agent-instruction types, all
+  # serving the revenue/return-rate story. The point is not that Genie is wrong
+  # (it often guesses well) but that these definitions should be declared, not
+  # left to chance - and even declared here, they live only in this agent.
+  curation:
+    general_screenshot: 03_3_general_instructions.png
+    # General instructions = the gap-filler. Only put here what the structured
+    # definitions (column comments, measures, filters, joins) can't express:
+    # tone, defaults, disambiguation, enum guards. Anything computable should be
+    # a measure/filter instead.
+    general_instructions: >-
+      Order status is only ever 'completed', 'cancelled' or 'returned' - never
+      assume any other value. An order has many line items, and each line item
+      is one product; count distinct orders, not line items, unless the question
+      is about items or units sold.
+
+      "Region" means the region field (AMER, EMEA, APAC), "segment" means
+      customer segment (Consumer, Corporate, Small Business), and sales channels
+      are online, store and partner.
+
+      Always state the time period you used in the answer, and if the question
+      doesn't give one, use the most recent full month. Format money values in
+      US dollars ($) with no decimal places, unless the user asks for more
+      precision.
+
+      If a question is ambiguous - gross vs net, by count vs by value, which
+      orders to include - ask a clarifying question instead of guessing. Never
+      invent a metric definition that isn't defined here; if you're unsure, say
+      so and ask the user to clarify.
+    sql_expressions:
+      # Column names are table-qualified: the agent has several tables, so
+      # Genie needs to know which table each column comes from.
+      # Only net_revenue carries a screenshot; return_rate and last_month don't.
+      - name: return_rate
+        kind: Measure
+        screenshot: 03_6_measure_return_rate.png
+        expr: >-
+          COUNT(DISTINCT CASE WHEN orders.status = 'returned' THEN orders.order_id END)
+          / COUNT(DISTINCT CASE WHEN orders.status IN ('completed', 'returned') THEN orders.order_id END)
+        synonyms: [return rate, returns rate, percent returned]
+        hint: >-
+          This pins down a base that's genuinely debatable - so Genie stops
+          guessing the denominator.
+        comment: >-
+          Share of fulfilled orders that were returned. Denominator counts
+          distinct orders that were completed or returned; cancelled orders are
+          excluded because they were never fulfilled.
+      - name: net_revenue
+        kind: Measure
+        screenshot: 03_7_measure_net_revenue.png
+        expr: SUM(order_items.net_amount) FILTER (WHERE orders.status = 'completed')
+        synonyms: [revenue, sales, money made, earnings]
+        comment: >-
+          Net revenue: completed orders only, net of discounts, excluding
+          shipping. The company's single definition of revenue.
+      - name: last_month
+        kind: Filter
+        screenshot: 03_8_filter_last_month.png
+        expr: >-
+          orders.order_date >= DATE_TRUNC('MONTH', ADD_MONTHS(CURRENT_DATE, -1))
+          AND orders.order_date < DATE_TRUNC('MONTH', CURRENT_DATE)
+        synonyms: [last month, previous month, prior month]
+        comment: The previous full calendar month.
+    # A deliberately COMPLEX example - multi-step logic Genie does not reliably
+    # get right on its own (per-category return rate vs the overall average).
+    # Example queries are for hard patterns, not metrics Genie already nails.
+    example_query:
+      screenshot: 03_9_example_query.png
+      question: "What is our return rate by category in June 2026?"
+      sql: |
+        SELECT
+          p.category,
+          ROUND(
+            COUNT(DISTINCT CASE WHEN o.status = 'returned' THEN o.order_id END) * 1.0
+              / COUNT(DISTINCT CASE WHEN o.status IN ('completed', 'returned') THEN o.order_id END),
+            3) AS return_rate
+        FROM {catalog}.{data_schema}.orders o
+        JOIN {catalog}.{data_schema}.order_items oi ON o.order_id = oi.order_id
+        JOIN {catalog}.{data_schema}.products p ON oi.product_id = p.product_id
+        WHERE o.order_date >= DATE '2026-06-01'
+          AND o.order_date < DATE '2026-07-01'
+        GROUP BY p.category
+        ORDER BY return_rate DESC
+    join:
+      tables: orders and order_items
+      'on': "orders.order_id = order_items.order_id"
+      note: one order has many line items
+      screenshot: 03_5_join.png
+    expression_types_screenshot: 03_4_examples_add.png
+  mv_space:
+    title_template: "Retail Sales and Customer Analytics (metric view)"
+    description: "Lab Module 5: Genie over the certified retail metric view."
+    metric_views: ["{metric_view}"]
+    screenshot: 05_1_add_metric_view.png
+    # General instructions here are for anything you can't define in the metric
+    # view yet - behaviour, tone, defaults, disambiguation. The measures, their
+    # synonyms and formats already come from the view, so for this demo there's
+    # nothing left to add.
+    instructions: ""
+  # Module 5, Step 2: same questions, now answered from the metric view.
+  governed_answers:
+    - metric: Revenue
+      verdict: correct
+      screenshot: 05_2_revenue_measure.png
+      note: >-
+        Genie's SQL now calls <code>MEASURE(`Net Revenue`)</code> - the certified
+        definition, straight from the metric view. No arithmetic to guess.
+    - metric: Return rate
+      verdict: correct
+      screenshot: 05_3_return_rate_measure.png
+      note: >-
+        <code>MEASURE(`Return Rate`)</code> - the same 11.5% on the fulfilled
+        base, with nothing defined in this agent.
+  # Module 6: benchmark the metric-view agent. The ground truth queries the
+  # metric view itself with MEASURE(...), because that agent's data room exposes
+  # only the view, not the raw tables.
+  benchmark:
+    question: "What was our return rate by category in 2026?"
+    sql: |
+      SELECT
+        `Product Category`,
+        MEASURE(`Return Rate`) AS `Return Rate`
+      FROM {metric_view}
+      WHERE `Order Month` >= DATE '2026-01-01'
+        AND `Order Month` < DATE '2027-01-01'
+      GROUP BY `Product Category`
+      ORDER BY `Return Rate` DESC
+
+# -----------------------------------------------------------------------------
+# Metric view: the centralized, certified definitions (Module 3).
+# -----------------------------------------------------------------------------
+metric_view:
+  name: retail_metrics
+  file: metric_view.yaml
+  certified_comment: >-
+    CERTIFIED - Official retail metrics. net_revenue is the company's single
+    definition of revenue: completed orders only, net of discounts, excluding
+    shipping.

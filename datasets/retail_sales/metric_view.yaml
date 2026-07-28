@@ -1,0 +1,164 @@
+version: 1.1
+
+source: |-
+  SELECT
+    o.order_id,
+    o.order_date,
+    o.status,
+    o.sales_channel,
+    o.shipping_amount,
+    oi.order_item_id,
+    oi.quantity,
+    oi.unit_price,
+    oi.gross_amount,
+    oi.discount_amount,
+    oi.net_amount,
+    p.product_name,
+    p.category,
+    c.customer_name,
+    c.region,
+    c.segment
+  FROM {catalog}.{data_schema}.orders o
+  JOIN {catalog}.{data_schema}.order_items oi ON o.order_id = oi.order_id
+  JOIN {catalog}.{data_schema}.products p ON oi.product_id = p.product_id
+  JOIN {catalog}.{data_schema}.customers c ON o.customer_id = c.customer_id
+
+comment: >-
+  Certified retail sales metrics. Net Revenue is the official company definition
+  of revenue: completed orders only, net of discounts, excluding shipping fees.
+
+dimensions:
+  - name: Order Date
+    expr: order_date
+
+  - name: Order Month
+    expr: "DATE_TRUNC('MONTH', order_date)"
+    synonyms:
+      - month
+      - order month
+    format:
+      type: date
+      date_format: locale_long_month
+
+  - name: Order Status
+    expr: status
+    synonyms:
+      - status
+
+  - name: Sales Channel
+    expr: sales_channel
+    synonyms:
+      - channel
+      - sales channel
+
+  - name: Product Category
+    expr: category
+    synonyms:
+      - category
+      - product category
+
+  - name: Product
+    expr: product_name
+    synonyms:
+      - product
+      - product name
+
+  - name: Region
+    expr: region
+    synonyms:
+      - region
+      - sales region
+
+  - name: Customer Segment
+    expr: segment
+    synonyms:
+      - segment
+      - customer segment
+
+measures:
+  - name: Net Revenue
+    expr: SUM(net_amount) FILTER (WHERE status = 'completed')
+    synonyms:
+      - revenue
+      - sales
+      - money made
+      - earnings
+    format:
+      type: currency
+      currency_code: USD
+      decimal_places:
+        type: exact
+        places: 0
+
+  - name: Gross Revenue
+    expr: SUM(gross_amount) FILTER (WHERE status <> 'cancelled')
+    synonyms:
+      - gross revenue
+      - gross sales
+    format:
+      type: currency
+      currency_code: USD
+      decimal_places:
+        type: exact
+        places: 0
+
+  - name: Total Discounts
+    expr: SUM(discount_amount) FILTER (WHERE status <> 'cancelled')
+    synonyms:
+      - discounts
+      - total discounts
+    format:
+      type: currency
+      currency_code: USD
+      decimal_places:
+        type: exact
+        places: 0
+
+  - name: Completed Orders
+    expr: COUNT(DISTINCT order_id) FILTER (WHERE status = 'completed')
+    synonyms:
+      - orders
+      - order count
+      - number of orders
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 0
+
+  - name: Average Order Value
+    expr: SUM(net_amount) FILTER (WHERE status = 'completed') / COUNT(DISTINCT order_id) FILTER (WHERE status = 'completed')
+    synonyms:
+      - aov
+      - average order value
+      - average basket
+    format:
+      type: currency
+      currency_code: USD
+      decimal_places:
+        type: exact
+        places: 2
+
+  - name: Return Rate
+    expr: COUNT(DISTINCT order_id) FILTER (WHERE status = 'returned') / COUNT(DISTINCT order_id) FILTER (WHERE status <> 'cancelled')
+    synonyms:
+      - return rate
+      - returns rate
+      - percent returned
+    format:
+      type: percentage
+      decimal_places:
+        type: exact
+        places: 1
+
+  - name: Units Sold
+    expr: SUM(quantity) FILTER (WHERE status = 'completed')
+    synonyms:
+      - units
+      - units sold
+      - quantity sold
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 0
